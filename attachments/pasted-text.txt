@@ -1,0 +1,1520 @@
+/**
+ * ==========================================================================================
+ * 🚀 ORION BOT PRO v39.0 TITANIUM — ULTRA-SCALPER COM LEITURA DE CONTEXTO & PRICE ACTION
+ * ==========================================================================================
+ * - FILTRO DE EXAUSTÃO: Bloqueia entradas após 3+ velas consecutivas da mesma cor.
+ * - FILTRO DE PAVIO DE REJEIÇÃO: Rejeita sombras superiores em CALL e sombras inferiores em PUT.
+ * - FILTRO DE CORPO EXPRESSIVO: Exige corpo >= 55% do range (elimina Dojis e velas anêmicas).
+ * - FILTRO DE DESACELERAÇÃO: Detecta perda de momentum pré-reversão.
+ * - HISTÓRICO MÍNIMO: 4 velas para mapear contexto antes de disparar.
+ * ==========================================================================================
+ */
+
+(function () {
+  'use strict';
+
+  if (window.__ORION_V38_INTERVALS__ && Array.isArray(window.__ORION_V38_INTERVALS__)) {
+    window.__ORION_V38_INTERVALS__.forEach(id => clearInterval(id));
+  }
+  window.__ORION_V38_INTERVALS__ = [];
+  window.__ORION_V38_LOADED__ = true;
+
+  console.log('%c[ORION TITANIUM v39.0] Motor com Filtros Anti-Exaustão Carregado!', 'color: #10b981; font-weight: 900; font-size: 16px;');
+
+  const BULL_ICON = 'https://ucycjlwmgdnayebmpfmf.supabase.co/storage/v1/object/public/admin-files/1778007746461-bull.png';
+  const BEAR_ICON = 'https://ucycjlwmgdnayebmpfmf.supabase.co/storage/v1/object/public/admin-files/1778007752753-bear.png';
+  const DESKTOP_VIDEO = 'https://oggtaibqhyvmupulskfm.supabase.co/storage/v1/object/public/admin-files/1777054051734-Background_Orion.mp4';
+
+  const MIN_HISTORY = 4; // Exige histórico mínimo para ler pernada e exaustão
+  const SCAN_TIMEOUT_MS = 18000;
+  const SWITCH_COOLDOWN_MS = 2000;
+  const AUDIT_TIMEOUT_MS = 7000;
+
+  const RAW_INPUT_CATALOG = [
+    ['AED/CNY OTC', 'AED/CNY', 92, 'currencies', '💱'],
+    ['TND/USD OTC', 'TND/USD', 92, 'currencies', '💱'],
+    ['EUR/USD OTC', 'EUR/USD', 92, 'currencies', '🇪🇺'],
+    ['GBP/USD OTC', 'GBP/USD', 92, 'currencies', '🇬🇧'],
+    ['USD/JPY OTC', 'USD/JPY', 92, 'currencies', '🇺🇸'],
+    ['AUD/USD OTC', 'AUD/USD', 92, 'currencies', '🇦🇺'],
+    ['USD/CAD OTC', 'USD/CAD', 92, 'currencies', '🇺🇸'],
+    ['USD/CHF OTC', 'USD/CHF', 91, 'currencies', '🇨🇭'],
+    ['NZD/USD OTC', 'NZD/USD', 91, 'currencies', '🇳🇿'],
+    ['EUR/JPY OTC', 'EUR/JPY', 92, 'currencies', '🇪🇺'],
+    ['GBP/JPY OTC', 'GBP/JPY', 92, 'currencies', '🇬🇧'],
+    ['EUR/GBP OTC', 'EUR/GBP', 91, 'currencies', '🇪🇺'],
+    ['USD/BRL OTC', 'USD/BRL', 92, 'currencies', '🇧🇷'],
+    ['USD/INR OTC', 'USD/INR', 91, 'currencies', '🇮🇳'],
+    ['USD/TRY OTC', 'USD/TRY', 91, 'currencies', '🇹🇷'],
+    ['Apple (OTC)', 'Apple', 92, 'actions', '🍏'],
+    ['Microsoft (OTC)', 'Microsoft', 92, 'actions', '💻'],
+    ['Tesla (OTC)', 'Tesla', 92, 'actions', '🚗'],
+    ['Amazon (OTC)', 'Amazon', 92, 'actions', '📦'],
+    ['Gold (Ouro) OTC', 'Gold', 92, 'commodities', '🥇'],
+    ['Silver (Prata) OTC', 'Silver', 91, 'commodities', '🥈'],
+    ['Bitcoin (OTC)', 'Bitcoin', 92, 'crypto', '₿'],
+    ['Ethereum (OTC)', 'Ethereum', 92, 'crypto', '💎']
+  ];
+
+  const OTC_ASSET_CATALOG = RAW_INPUT_CATALOG
+    .map(c => ({ name: c[0], searchKey: c[1], defaultPay: c[2], category: c[3], icon: c[4] }))
+    .filter(c => c.defaultPay >= 82)
+    .sort((a, b) => b.defaultPay - a.defaultPay);
+
+  const BLACKLIST_EMPATE_KEYS = new Set([
+    'SOL/USD(OTC)', 'META(OTC)', 'PEPE(OTC)', 'CAFE(OTC)', 'USOUSD(OTC)',
+    'MICROSOFTCORPORATION(OTC)', 'APPLE(OTC)', 'GBP/CHF(OTC)'
+  ]);
+
+  const State = {
+    isRunning: false,
+    wins: 0,
+    losses: 0,
+    empates: 0,
+    currentProfit: 0.0,
+    entryAmount: 1.0,
+    targetMeta: 50.0,
+    expirationSeconds: 10,
+    minPayoutFilter: 82,
+    stopLossLimit: 3,
+    consecutiveLosses: 0,
+    pocketBalance: 0,
+    currentChartAsset: 'NZD/USD (OTC)',
+    currentChartPayout: 92,
+    payoutKnown: false,
+    lastTradedAssetName: '',
+    recentTradedQueue: [],
+    vipCursor: 0,
+    lastSwitchTimestamp: 0,
+    typedSearchText: '',
+    isTypingAsset: false,
+    typingStartedAt: 0,
+    switchToken: 0,
+
+    signalDirection: 'NEUTRO',
+    bullForcePct: 50,
+    bearForcePct: 50,
+    confidence: 0,
+    srZoneLabel: 'CALIBRANDO CONTEXTO...',
+    tradeStatusText: 'Robô Pronto - Com Filtros de Price Action',
+    tradeInProgress: false,
+    waitingForZeroSeconds: false,
+    pendingEntry: null,
+    lastTradedCandleId: null,
+    priceMissing: false,
+
+    orderLock: false,
+    lastOrderClickTime: 0,
+
+    managementMode: 'SOROS',
+    sorosMaxLevel: 3,
+    currentSorosLevel: 1,
+    condicionalWinsCount: 0,
+    currentStake: 1.0,
+    lastEntryStake: 1.0,
+
+    parallelRadar: []
+  };
+
+  function refreshRadarAssets() {
+    const top4 = OTC_ASSET_CATALOG.filter(a => !BLACKLIST_EMPATE_KEYS.has(normKey(a.name))).slice(0, 4);
+    State.parallelRadar = top4.map(a => ({ name: a.name, score: 0, status: 'IDLE', pay: a.defaultPay }));
+  }
+  refreshRadarAssets();
+
+  function parseBalanceNumber(str) {
+    if (!str) return 0;
+    let s = String(str).replace(/[^\d.,]/g, '').trim();
+    if (!s) return 0;
+    if (s.includes(',') && s.includes('.')) {
+      if (s.lastIndexOf(',') > s.lastIndexOf('.')) s = s.replace(/\./g, '').replace(',', '.');
+      else s = s.replace(/,/g, '');
+    } else if (s.includes(',')) s = s.replace(',', '.');
+    const num = parseFloat(s);
+    return isNaN(num) ? 0 : Number(num.toFixed(2));
+  }
+
+  function parsePrice(str) {
+    if (!str) return null;
+    let s = String(str).replace(/[^\d.,]/g, '');
+    if (!s) return null;
+    if (s.includes(',') && s.includes('.')) {
+      if (s.lastIndexOf(',') > s.lastIndexOf('.')) s = s.replace(/\./g, '').replace(',', '.');
+      else s = s.replace(/,/g, '');
+    } else if (s.includes(',')) s = s.replace(',', '.');
+    const n = parseFloat(s);
+    return isNaN(n) || n <= 0 ? null : n;
+  }
+
+  function isOTC(name) {
+    return /\bOTC\b/i.test(String(name || ''));
+  }
+
+  function cleanAssetName(raw) {
+    if (!raw) return '';
+    let s = String(raw).replace(/\s+/g, ' ').trim();
+    s = s.replace(/[+-]?\d+([.,]\d+)?\s*%/g, '');
+    s = s.replace(/R?\$\s*[\d.,]+/gi, '');
+    s = s.replace(/Conta\s+(demo|real)/gi, '');
+    s = s.replace(/Blitz/gi, '').trim();
+    const m = s.match(/^(.*?)\s*\(?\bOTC\b\)?/i);
+    if (m) {
+      const base = m[1].replace(/[()\s]+$/g, '').trim();
+      if (base) return `${base} (OTC)`;
+    }
+    return s;
+  }
+
+  function stripOTC(name) {
+    return cleanAssetName(name).replace(/\s*\(OTC\)\s*$/i, '').trim();
+  }
+
+  function normKey(s) {
+    return String(s || '')
+      .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+      .replace(/[\/\s_\-()]/g, '')
+      .toUpperCase();
+  }
+
+  function normText(s) {
+    return String(s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().trim();
+  }
+
+  function getBrokerSearchQuery(name) {
+    const base = stripOTC(name);
+    const parts = base.split('/');
+    if (parts.length === 2 && /^[A-Za-z]{3}$/.test(parts[0].trim()) && /^[A-Za-z]{3}$/.test(parts[1].trim())) {
+      return parts.join('').trim();
+    }
+    return parts[0].trim();
+  }
+
+  function isVisible(el) {
+    if (!el || !el.getBoundingClientRect) return false;
+    const r = el.getBoundingClientRect();
+    if (r.width <= 0 || r.height <= 0) return false;
+    const st = window.getComputedStyle(el);
+    return st.visibility !== 'hidden' && st.display !== 'none' && st.opacity !== '0';
+  }
+
+  function isOrionEl(el) {
+    const root = document.getElementById('orion-titanium-root');
+    return !!(root && el && root.contains(el));
+  }
+
+  function pushRecent(key) {
+    State.recentTradedQueue.push(key);
+    if (State.recentTradedQueue.length > 10) State.recentTradedQueue.shift();
+  }
+
+  function getBrazilTime() {
+    const fmt = new Intl.DateTimeFormat('pt-BR', {
+      timeZone: 'America/Sao_Paulo',
+      hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false
+    });
+    return fmt.format(new Date());
+  }
+
+  function getCandleSync(expirationSeconds) {
+    const periodMs = Math.max(1000, expirationSeconds * 1000);
+    const nowMs = Date.now();
+    const msIntoCurrentCandle = nowMs % periodMs;
+    const msUntilNextCandle = periodMs - msIntoCurrentCandle;
+    return {
+      periodMs,
+      nowMs,
+      candleId: Math.floor(nowMs / periodMs),
+      msIntoCurrentCandle,
+      msUntilNextCandle,
+      secondsUntilNextCandle: Math.ceil(msUntilNextCandle / 1000),
+      isAtZeroThreshold: msUntilNextCandle <= 220 || msIntoCurrentCandle <= 180
+    };
+  }
+
+  const WSTap = window.__ORION_WSTAP3__ || (window.__ORION_WSTAP3__ = {
+    prices: new Map(),
+    hooked: new WeakSet(),
+    sockets: new Set(),
+    ticks: 0,
+    active: null,
+
+    attach(ws) {
+      if (!ws || this.hooked.has(ws)) return;
+      this.hooked.add(ws);
+      this.sockets.add(ws);
+      ws.addEventListener('message', (ev) => this.onMessage(ev.data));
+      ws.addEventListener('close', () => this.sockets.delete(ws));
+    },
+
+    onSend(data) {
+      try {
+        if (typeof data !== 'string') return;
+        const i = data.indexOf('[');
+        if (i < 0) return;
+        const arr = JSON.parse(data.slice(i));
+        if (Array.isArray(arr) && (arr[0] === 'changeSymbol' || arr[0] === 'openOrder')) {
+          if (arr[1] && typeof arr[1].asset === 'string') this.active = arr[1].asset;
+        }
+      } catch (e) {}
+    },
+
+    onMessage(data) {
+      try {
+        if (typeof data === 'string') this.parseText(data);
+        else if (data instanceof ArrayBuffer) this.parseText(new TextDecoder().decode(data));
+        else if (typeof Blob !== 'undefined' && data instanceof Blob) {
+          data.text().then(t => this.parseText(t)).catch(() => {});
+        }
+      } catch (e) {}
+    },
+
+    parseText(t) {
+      const i = t.indexOf('[');
+      if (i < 0) return;
+      try {
+        const obj = JSON.parse(t.slice(i));
+        this.handle(obj);
+      } catch (e) {}
+    },
+
+    handle(obj) {
+      if (!Array.isArray(obj)) return;
+      if (obj[0] === 'updateStream' && Array.isArray(obj[1])) obj = obj[1];
+      const now = Date.now();
+      for (const tk of obj) {
+        if (Array.isArray(tk) && typeof tk[0] === 'string' && typeof tk[2] === 'number' && tk[2] > 0) {
+          const sym = tk[0];
+          const price = tk[2];
+          let rec = this.prices.get(sym);
+          if (!rec) {
+            rec = { p: price, t: now, ticks: [] };
+            this.prices.set(sym, rec);
+          }
+          rec.p = price;
+          rec.t = now;
+          rec.ticks.push({ t: now, p: price });
+          while (rec.ticks.length && now - rec.ticks[0].t > 3000) rec.ticks.shift();
+          this.ticks++;
+
+          RealCandleTracker.sampleDirectTick(sym, price, now);
+        }
+      }
+    },
+
+    getActivePrice(assetName) {
+      const now = Date.now();
+      const wanted = normKey(stripOTC(assetName));
+      for (const [sym, rec] of this.prices) {
+        if (now - rec.t <= 2500 && normKey(sym.replace(/_otc$/i, '')) === wanted) {
+          return rec.p;
+        }
+      }
+      if (this.active && this.prices.has(this.active)) {
+        const rec = this.prices.get(this.active);
+        if (now - rec.t <= 2500) return rec.p;
+      }
+      return null;
+    },
+
+    getFlowMetrics(assetName) {
+      const wanted = normKey(stripOTC(assetName));
+      for (const [sym, rec] of this.prices) {
+        if (normKey(sym.replace(/_otc$/i, '')) === wanted) {
+          const count = rec.ticks.length;
+          const tps = count / 3;
+          return { tps, alive: tps >= 0.6, count };
+        }
+      }
+      return { tps: 0, alive: false, count: 0 };
+    }
+  });
+
+  if (!window.__ORION_WS_PATCHED3__) {
+    window.__ORION_WS_PATCHED3__ = true;
+    const origSend = WebSocket.prototype.send;
+    WebSocket.prototype.send = function (d) {
+      try { WSTap.attach(this); WSTap.onSend(d); } catch (e) {}
+      return origSend.apply(this, arguments);
+    };
+
+    const OrigWS = window.WebSocket;
+    if (OrigWS) {
+      const PatchedWS = function (...args) {
+        const ws = new OrigWS(...args);
+        try { WSTap.attach(ws); } catch (e) {}
+        return ws;
+      };
+      PatchedWS.prototype = OrigWS.prototype;
+      Object.assign(PatchedWS, OrigWS);
+      window.WebSocket = PatchedWS;
+    }
+  }
+
+  const RealCandleTracker = {
+    buffers: new Map(),
+
+    getBuffer(assetName) {
+      const key = normKey(stripOTC(assetName));
+      if (!this.buffers.has(key)) {
+        this.buffers.set(key, { history: [], currentCandle: null });
+      }
+      return this.buffers.get(key);
+    },
+
+    resetHistory() {
+      this.buffers.clear();
+    },
+
+    sampleDirectTick(sym, price, timeMs) {
+      this.processPriceForAsset(sym.replace(/_otc$/i, ''), price);
+    },
+
+    sampleTickDOM() {
+      if (State.isTypingAsset) return;
+      const price = BrokerDOM.readCurrentTickPrice();
+      if (price !== null) this.processPriceForAsset(State.currentChartAsset, price);
+    },
+
+    processPriceForAsset(assetName, price) {
+      const buf = this.getBuffer(assetName);
+      const sync = getCandleSync(State.expirationSeconds);
+
+      if (!buf.currentCandle || buf.currentCandle.id !== sync.candleId) {
+        if (buf.currentCandle) {
+          const c = buf.currentCandle;
+          if (!c.partial) {
+            c.isGreen = c.close > c.open;
+            c.isRed = c.close < c.open;
+            c.range = c.high - c.low;
+            c.body = Math.abs(c.close - c.open);
+            c.upperWick = c.high - Math.max(c.open, c.close);
+            c.lowerWick = Math.min(c.open, c.close) - c.low;
+            buf.history.push(c);
+            if (buf.history.length > 25) buf.history.shift();
+          }
+        }
+        buf.currentCandle = {
+          id: sync.candleId,
+          open: price, high: price, low: price, close: price,
+          partial: buf.currentCandle === null
+        };
+      } else {
+        buf.currentCandle.high = Math.max(buf.currentCandle.high, price);
+        buf.currentCandle.low = Math.min(buf.currentCandle.low, price);
+        buf.currentCandle.close = price;
+      }
+    }
+  };
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // MOTOR DE CONFLUÊNCIA BLINDADO COM ANÁLISE DE CONTEXTO E VELAS
+  // ═══════════════════════════════════════════════════════════════════════
+  function setSignal(dir, conf, bull, bear, label) {
+    State.signalDirection = dir;
+    State.confidence = conf;
+    State.bullForcePct = bull;
+    State.bearForcePct = bear;
+    State.srZoneLabel = label;
+  }
+
+  const ConfluenceEngine = {
+    analyze(assetName = State.currentChartAsset) {
+      const buf = RealCandleTracker.getBuffer(assetName);
+      const history = buf.history;
+      const asset = assetName;
+
+      const triggerEvacuate = (reason) => {
+        setSignal('NEUTRO', 30, 50, 50, `⚠️ ${reason}`);
+        return { canTrade: false, evacuate: true, reason };
+      };
+
+      const blockWait = (label, conf = 0) => {
+        setSignal('NEUTRO', conf, 50, 50, label);
+        return { canTrade: false, evacuate: false, reason: label };
+      };
+
+      const fire = (dir, conf, scenarioName, reason) => {
+        const isCall = dir === 'COMPRA';
+        setSignal(dir, conf, isCall ? conf : 100 - conf, isCall ? 100 - conf : conf, scenarioName);
+        return { canTrade: true, evacuate: false, direction: dir, confidence: conf, reason };
+      };
+
+      if (!isOTC(asset)) return triggerEvacuate('EXIGE PAR OTC');
+      if (BLACKLIST_EMPATE_KEYS.has(normKey(asset))) return triggerEvacuate('PAR COM HISTÓRICO DE EMPATES');
+
+      if (history.length < MIN_HISTORY) {
+        return blockWait(`LENDO CONTEXTO (${history.length}/${MIN_HISTORY} VELAS)...`, 35);
+      }
+
+      const last = history[history.length - 1]; // Vela anterior imediata
+      const prev = history[history.length - 2]; // Penúltima vela
+
+      const range = last.high - last.low;
+      if (range <= 0) return blockWait('VELA SEM RANGE (DOJI LINHA)', 20);
+
+      const body = Math.abs(last.close - last.open);
+      const bodyRatio = body / range;
+      const upperWick = last.high - Math.max(last.open, last.close);
+      const lowerWick = Math.min(last.open, last.close) - last.low;
+
+      // 1. FILTRO DE CORPO ANÊMICO / INDECISÃO (Elimina perdas como AED/CNY no vídeo)
+      if (bodyRatio < 0.52) {
+        return blockWait(`CORPO FRACO (${Math.round(bodyRatio * 100)}% < 52%) - INDECISÃO`, 25);
+      }
+
+      // 2. CONTAGEM DE VELAS CONSECUTIVAS (FILTRO DE EXAUSTÃO - Elimina perdas em NZD/USD e EUR/USD)
+      let consecutiveRed = 0;
+      let consecutiveGreen = 0;
+
+      for (let i = history.length - 1; i >= 0; i--) {
+        if (history[i].isRed) {
+          if (consecutiveGreen > 0) break;
+          consecutiveRed++;
+        } else if (history[i].isGreen) {
+          if (consecutiveRed > 0) break;
+          consecutiveGreen++;
+        } else break;
+      }
+
+      // Se já temos 3 ou mais velas da mesma cor, o movimento está esticado (alto risco de reversão)
+      if (last.isRed && consecutiveRed >= 3) {
+        return blockWait(`EXAUSTÃO DE BAIXA: ${consecutiveRed} VELAS VERMELHAS SEGUIDAS`, 30);
+      }
+      if (last.isGreen && consecutiveGreen >= 3) {
+        return blockWait(`EXAUSTÃO DE ALTA: ${consecutiveGreen} VELAS VERDES SEGUIDAS`, 30);
+      }
+
+      // 3. FILTRO DE PAVIO DE REJEIÇÃO
+      // Se for vela vermelha, mas deixou pavio inferior grande (> 30%), compradores estão defendendo o fundo
+      if (last.isRed && (lowerWick / range) > 0.30) {
+        return blockWait(`REJEIÇÃO DE FUNDO: PAVIO INFERIOR ${(lowerWick / range * 100).toFixed(0)}%`, 35);
+      }
+
+      // Se for vela verde, mas deixou pavio superior grande (> 30%), vendedores estão defendendo o topo
+      if (last.isGreen && (upperWick / range) > 0.30) {
+        return blockWait(`REJEIÇÃO DE TOPO: PAVIO SUPERIOR ${(upperWick / range * 100).toFixed(0)}%`, 35);
+      }
+
+      // 4. FILTRO DE DESACELERAÇÃO (Perda de Momentum contra a vela anterior)
+      const prevBody = Math.abs(prev.close - prev.open);
+      if (prevBody > 0 && body < prevBody * 0.50 && last.isRed === prev.isRed) {
+        return blockWait('DESACELERAÇÃO DE MOMENTUM (CORPO REDUZIU > 50%)', 30);
+      }
+
+      // ENTRADA AUTORIZADA
+      if (last.isGreen) {
+        return fire('COMPRA', 92, `🟢 FLUXO DE ALTA CONFIRMADO (${State.expirationSeconds}s)`, 'Corpo forte sem rejeição superior');
+      } else if (last.isRed) {
+        return fire('VENDA', 92, `🔴 FLUXO DE BAIXA CONFIRMADO (${State.expirationSeconds}s)`, 'Corpo forte sem rejeição inferior');
+      } else {
+        return blockWait('DOJI PURO', 20);
+      }
+    }
+  };
+
+  function updateParallelRadar() {
+    for (const item of State.parallelRadar) {
+      const decision = ConfluenceEngine.analyze(item.name);
+      if (decision.canTrade) {
+        item.score = 92;
+        item.status = `SINAL: ${decision.direction}`;
+      } else {
+        const flow = WSTap.getFlowMetrics(item.name);
+        item.score = flow.alive ? 60 : 35;
+        item.status = flow.alive ? `${State.expirationSeconds}s ATIVO` : 'LENTO';
+      }
+    }
+
+    const grid = document.getElementById('orion-radar-container');
+    if (grid) {
+      grid.innerHTML = State.parallelRadar.map(item => `
+        <div style="background:rgba(6,4,15,0.7);padding:4px 8px;border-radius:6px;border:1px solid ${item.score >= 80 ? 'rgba(16,185,129,0.8)' : 'rgba(255,255,255,0.1)'};display:flex;justify-content:space-between;align-items:center;">
+          <div style="display:flex;flex-direction:column;">
+            <span style="font-size:9.5px;font-weight:800;color:#e2e8f0;">${item.name.replace(' (OTC)', '')}</span>
+            <span style="font-size:8px;font-weight:900;color:#fbbf24;">+${item.pay}%</span>
+          </div>
+          <span style="font-family:monospace;font-size:10px;font-weight:900;color:${item.score >= 80 ? '#34d399' : '#94a3b8'};">${item.score}%</span>
+        </div>
+      `).join('');
+    }
+  }
+
+  const BrokerDOM = {
+    _priceEl: null,
+    _lastScan: 0,
+
+    realSingleClick(el) {
+      if (!el) return false;
+      try {
+        const rect = el.getBoundingClientRect();
+        const opts = {
+          bubbles: true, cancelable: true, view: window,
+          clientX: rect.left + rect.width / 2, clientY: rect.top + rect.height / 2
+        };
+        el.dispatchEvent(new MouseEvent('mousedown', opts));
+        el.dispatchEvent(new MouseEvent('mouseup', opts));
+        el.click();
+        return true;
+      } catch (e) {
+        try { el.click(); return true; } catch (err) { return false; }
+      }
+    },
+
+    readAccountType() {
+      const sels = ['.balance-info-block__label', '.balance-info-block__data', '.balance-info-block', '.account-info__type'];
+      for (const sel of sels) {
+        const el = document.querySelector(sel);
+        const t = el ? (el.innerText || '').toLowerCase() : '';
+        if (t.includes('demo') || t.includes('prática') || t.includes('pratica')) return 'DEMO';
+        if (t.includes('real')) return 'REAL';
+      }
+      return 'DESCONHECIDA';
+    },
+
+    readBrokerExpiration() {
+      const roots = document.querySelectorAll('.right-sidebar, .section-deal');
+      const re = /^(\d{1,2}):(\d{2}):(\d{2})$/;
+      for (const root of roots) {
+        const els = root.querySelectorAll('input, div, span');
+        for (const el of els) {
+          if (isOrionEl(el)) continue;
+          const raw = el.tagName === 'INPUT' ? el.value : (el.children.length === 0 ? el.textContent : '');
+          const m = re.exec(String(raw || '').trim());
+          if (!m) continue;
+          const sec = (+m[1]) * 3600 + (+m[2]) * 60 + (+m[3]);
+          if ((sec === 5 || sec === 10 || sec === 15) && isVisible(el)) return sec;
+        }
+      }
+      return null;
+    },
+
+    readCurrentChartSymbol() {
+      const sels = [
+        '.current-symbol', '.current-symbol_cropped',
+        '.pair-number-wrap .current-symbol', '.currencies-block__in .current-symbol',
+        '#bar-chart .current-symbol', '[data-testid="asset-select"]',
+        '.section-deal__header', '.assets-block__current'
+      ];
+      for (const sel of sels) {
+        const el = document.querySelector(sel);
+        if (el && !isOrionEl(el) && el.innerText) {
+          const raw = el.innerText.replace(/\s+/g, ' ').trim();
+          if (raw.length >= 3 && raw.length <= 70) {
+            const cleaned = cleanAssetName(raw);
+            if (cleaned) {
+              State.currentChartAsset = cleaned;
+              return cleaned;
+            }
+          }
+        }
+      }
+      return State.currentChartAsset;
+    },
+
+    readBalance() {
+      const sels = [
+        '.balance-info-block__balance .js-balance-demo',
+        '.balance-info-block__balance .js-balance-real-USD',
+        '.balance-info-block__balance .js-balance',
+        '.balance-info-block__balance span',
+        '.js-balance-demo', '.js-balance',
+        '[data-testid="balance"]'
+      ];
+      for (const sel of sels) {
+        const el = document.querySelector(sel);
+        if (el) {
+          let txt = el.innerText || '';
+          if (!txt.trim() || txt.includes('*')) txt = el.getAttribute('data-hd-show') || txt;
+          const val = parseBalanceNumber(txt);
+          if (val > 0) {
+            State.pocketBalance = val;
+            return val;
+          }
+        }
+      }
+      return State.pocketBalance;
+    },
+
+    readCurrentPayout() {
+      const accept = (txt) => {
+        const m = String(txt || '').match(/(\d{2,3})\s*%/);
+        if (m) {
+          const p = parseInt(m[1], 10);
+          if (p >= 50 && p <= 100) {
+            State.currentChartPayout = p;
+            State.payoutKnown = true;
+            return true;
+          }
+        }
+        return false;
+      };
+
+      const specific = ['.value__val-start', '.estimated-profit-block__percent', '.profit-percent', '.payout-percent'];
+      for (const sel of specific) {
+        const el = document.querySelector(sel);
+        if (el && accept(el.innerText)) return State.currentChartPayout;
+      }
+      const el = document.querySelector('.right-sidebar, #bar-chart, .section-deal');
+      if (el) {
+        const m = (el.innerText || '').match(/\+(\d{2,3})%/);
+        if (m && accept(m[0])) return State.currentChartPayout;
+      }
+      return State.currentChartPayout;
+    },
+
+    readCurrentTickPrice() {
+      const wsPrice = WSTap.getActivePrice(State.currentChartAsset);
+      if (wsPrice !== null) {
+        State.priceMissing = false;
+        return wsPrice;
+      }
+
+      const now = Date.now();
+      if (!this._priceEl || !this._priceEl.isConnected || now - this._lastScan > 1500) {
+        this._lastScan = now;
+        const re = /^\d[\d.,]*[.,]\d{2,6}$/;
+        const nodes = document.querySelectorAll('#bar-chart *, .chart-block *, .chart-container *');
+        for (const n of nodes) {
+          if (n.children.length === 0 && isVisible(n) && !isOrionEl(n)) {
+            const txt = (n.textContent || '').trim();
+            if (re.test(txt)) { this._priceEl = n; break; }
+          }
+        }
+      }
+
+      if (this._priceEl) {
+        const p = parsePrice(this._priceEl.textContent);
+        if (p !== null) {
+          State.priceMissing = false;
+          return p;
+        }
+      }
+      State.priceMissing = true;
+      return null;
+    },
+
+    setStake(amount) {
+      const valStr = Number(amount).toString();
+      const apply = (inp) => {
+        const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set;
+        if (setter) setter.call(inp, valStr); else inp.value = valStr;
+        inp.dispatchEvent(new Event('input', { bubbles: true }));
+        inp.dispatchEvent(new Event('change', { bubbles: true }));
+        inp.dispatchEvent(new Event('keyup', { bubbles: true }));
+      };
+
+      const preferred = [
+        '.block--bet-amount input[type="text"]',
+        '#put-call-buttons-chart-1 .block--bet-amount input',
+        '.section-deal .block--bet-amount input',
+        '.right-sidebar .block--bet-amount input'
+      ];
+      for (const sel of preferred) {
+        const inp = document.querySelector(sel);
+        if (inp && !isOrionEl(inp)) { apply(inp); return true; }
+      }
+      return false;
+    },
+
+    clickTrade(direction) {
+      const now = Date.now();
+      if (State.orderLock || now - State.lastOrderClickTime < 2000) {
+        return false;
+      }
+
+      State.orderLock = true;
+      State.lastOrderClickTime = now;
+
+      const isCall = direction === 'COMPRA';
+      const callSels = ['.btn-call', 'button.btn-call', 'a.btn-call', '[data-testid="higherButton"]', '.switch-state-block__item--up'];
+      const putSels = ['.btn-put', 'button.btn-put', 'a.btn-put', '[data-testid="lowerButton"]', '.switch-state-block__item--down'];
+      const targets = isCall ? callSels : putSels;
+
+      for (const sel of targets) {
+        const btn = document.querySelector(sel);
+        if (btn && !isOrionEl(btn) && isVisible(btn)) {
+          this.realSingleClick(btn);
+          return true;
+        }
+      }
+
+      State.orderLock = false;
+      return false;
+    },
+
+    pickNextVIPAsset() {
+      const total = OTC_ASSET_CATALOG.length;
+      const cur = normKey(State.currentChartAsset);
+      const last = normKey(State.lastTradedAssetName);
+
+      for (let attempt = 0; attempt < total; attempt++) {
+        State.vipCursor = (State.vipCursor + 1) % total;
+        const candidate = OTC_ASSET_CATALOG[State.vipCursor];
+        const key = normKey(candidate.name);
+
+        if (key === cur || key === last) continue;
+        if (State.recentTradedQueue.includes(key)) continue;
+        if (BLACKLIST_EMPATE_KEYS.has(key)) continue;
+        if (candidate.defaultPay < State.minPayoutFilter) continue;
+
+        return candidate;
+      }
+      State.vipCursor = 0;
+      return OTC_ASSET_CATALOG[0];
+    },
+
+    findSearchInput() {
+      const sel = 'input[placeholder*="Procurar"], input[placeholder*="Search"], input[placeholder*="Pesquis"], .search__field, .assets-block__search input, input[type="search"]';
+      return Array.from(document.querySelectorAll(sel)).find(i => !isOrionEl(i) && isVisible(i));
+    },
+
+    clickCategoryButton(categoryName) {
+      const target = normText(categoryName);
+      const re = new RegExp('^' + target.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '(\\s|\\d|$)');
+      const els = Array.from(document.querySelectorAll('button, a, li, div, span'))
+        .filter(el => {
+          if (isOrionEl(el) || !isVisible(el)) return false;
+          const t = normText(el.innerText || el.textContent);
+          return t.length > 0 && t.length <= 40 && re.test(t);
+        });
+
+      if (els.length === 0) return false;
+      els.sort((a, b) => (a.innerText || '').length - (b.innerText || '').length);
+      this.realSingleClick(els[0]);
+      return true;
+    },
+
+    closeModalIfOpen() {
+      if (!this.findSearchInput()) return;
+      const evInit = { key: 'Escape', code: 'Escape', keyCode: 27, which: 27, bubbles: true };
+      const targets = [document.activeElement, document.body, document];
+      for (const t of targets) {
+        if (!t) continue;
+        t.dispatchEvent(new KeyboardEvent('keydown', evInit));
+        t.dispatchEvent(new KeyboardEvent('keyup', evInit));
+      }
+    },
+
+    typeAndSwitchAsset(target, onComplete) {
+      if (!target || State.isTypingAsset) {
+        if (onComplete) onComplete();
+        return;
+      }
+
+      const fullName = cleanAssetName(target.name);
+      const category = target.category || 'Moedas';
+      const cleanQuery = getBrokerSearchQuery(fullName);
+      const wantKey = normKey(stripOTC(fullName));
+      const token = ++State.switchToken;
+
+      State.isTypingAsset = true;
+      State.typingStartedAt = Date.now();
+      State.typedSearchText = `${category} > ${cleanQuery}`;
+      State.tradeStatusText = `Trocando: [${category}] -> ${fullName} (+${target.defaultPay}%)...`;
+      renderHud();
+
+      const finish = () => {
+        if (token !== State.switchToken) return;
+        const actual = this.readCurrentChartSymbol();
+        const ok = normKey(actual) === normKey(fullName);
+
+        State.isTypingAsset = false;
+        State.lastSwitchTimestamp = Date.now();
+        RealCandleTracker.resetHistory();
+
+        if (ok) {
+          State.tradeStatusText = `Conectado em ${fullName} • Calibrando Contexto (${State.expirationSeconds}s)`;
+        } else {
+          pushRecent(normKey(fullName));
+          State.tradeStatusText = `Permaneceu em ${actual} (Tentará próximo)`;
+        }
+        renderHud();
+        if (onComplete) onComplete();
+      };
+
+      if (!this.findSearchInput()) {
+        const curSym = document.querySelector('.current-symbol') ||
+                       document.querySelector('.pair-number-wrap') ||
+                       document.querySelector('.currencies-block__in') ||
+                       document.querySelector('[data-testid="asset-select"]') ||
+                       document.querySelector('.current-symbol_cropped');
+        if (curSym) this.realSingleClick(curSym);
+      }
+
+      setTimeout(() => {
+        if (token !== State.switchToken) return;
+        this.clickCategoryButton(category);
+
+        setTimeout(() => {
+          if (token !== State.switchToken) return;
+
+          let i = 0;
+          const iv = setInterval(() => {
+            if (token !== State.switchToken) { clearInterval(iv); return; }
+            i++;
+            const partial = cleanQuery.slice(0, i);
+            State.typedSearchText = `${category} > ${partial}`;
+
+            const inp = this.findSearchInput();
+            if (inp) {
+              inp.focus();
+              const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set;
+              if (setter) setter.call(inp, partial); else inp.value = partial;
+              inp.dispatchEvent(new Event('input', { bubbles: true }));
+              inp.dispatchEvent(new Event('change', { bubbles: true }));
+            }
+            renderHud();
+
+            if (i >= cleanQuery.length) {
+              clearInterval(iv);
+              setTimeout(() => {
+                if (token !== State.switchToken) return;
+
+                const rows = Array.from(document.querySelectorAll(
+                  '.alist__item, .alist__link, .assets-table__item, [data-testid="asset-item"], .assets-block__item, li, tr, a'
+                )).filter(it => {
+                  if (isOrionEl(it) || !isVisible(it)) return false;
+                  const t = it.innerText || '';
+                  return isOTC(t) && normKey(t).includes(wantKey);
+                });
+
+                rows.sort((a, b) => (a.innerText || '').length - (b.innerText || '').length);
+
+                if (rows[0]) {
+                  const link = rows[0].querySelector('.alist__link, a, button') || rows[0];
+                  this.realSingleClick(link);
+                }
+
+                setTimeout(() => {
+                  if (token !== State.switchToken) return;
+                  this.closeModalIfOpen();
+                  setTimeout(finish, 200);
+                }, 300);
+              }, 250);
+            }
+          }, 35);
+        }, 220);
+      }, 220);
+    }
+  };
+
+  function auditTradeResultAccurate(initialBalance, stakeUsed, payoutPct, callback) {
+    const deadline = Date.now() + AUDIT_TIMEOUT_MS;
+    let settled = false;
+    const expectedProfit = Number((stakeUsed * (payoutPct / 100)).toFixed(2));
+
+    const iv = setInterval(() => {
+      if (settled) return;
+      const currentBal = BrokerDOM.readBalance();
+      const netDelta = Number((currentBal - initialBalance).toFixed(2));
+
+      if (netDelta >= expectedProfit * 0.4) {
+        settled = true;
+        clearInterval(iv);
+        callback('WIN', netDelta > 0 ? netDelta : expectedProfit);
+        return;
+      }
+
+      if (Math.abs(netDelta) <= 0.05 && (Date.now() > deadline - (AUDIT_TIMEOUT_MS - 2000))) {
+        settled = true;
+        clearInterval(iv);
+        callback('EMPATE', 0);
+        return;
+      }
+
+      if (Date.now() >= deadline) {
+        settled = true;
+        clearInterval(iv);
+        if (netDelta >= expectedProfit * 0.3) {
+          callback('WIN', netDelta);
+        } else if (Math.abs(netDelta) <= 0.1) {
+          callback('EMPATE', 0);
+        } else {
+          callback('LOSS', -Number(stakeUsed.toFixed(2)));
+        }
+      }
+    }, 150);
+  }
+
+  function handleTradeResult(status, delta, activePair) {
+    console.log(`[ORION AUDIT] Resultado: ${status} | Delta: ${delta >= 0 ? '+' : ''}${delta} | Ativo: ${activePair}`);
+
+    if (status === 'WIN') {
+      State.wins++;
+      State.consecutiveLosses = 0;
+      State.currentProfit = Number((State.currentProfit + delta).toFixed(2));
+
+      if (State.managementMode === 'SOROS') {
+        if (State.currentSorosLevel >= State.sorosMaxLevel) {
+          State.tradeStatusText = `🎉 SOROS BATIDO (+${delta})! Voltando Nível 1...`;
+          State.currentSorosLevel = 1;
+          State.currentStake = State.entryAmount;
+        } else {
+          State.currentSorosLevel++;
+          State.currentStake = Number((State.currentStake + delta).toFixed(2));
+          State.tradeStatusText = `✅ WIN! Soros Nível ${State.currentSorosLevel} -> $${State.currentStake.toFixed(2)}`;
+        }
+      } else if (State.managementMode === 'SOROS_CONDICIONAL') {
+        State.condicionalWinsCount++;
+        if (State.condicionalWinsCount >= 2) {
+          State.currentSorosLevel = 2;
+          State.currentStake = Number((State.entryAmount + delta).toFixed(2));
+          State.tradeStatusText = `🔥 2 WINS SEGUIDOS! Soros N2: $${State.currentStake.toFixed(2)}`;
+        } else {
+          State.currentStake = State.entryAmount;
+          State.tradeStatusText = `✅ WIN 1/2 Mão Fixa! Mais 1 p/ Soros.`;
+        }
+      } else {
+        State.currentStake = State.entryAmount;
+        State.tradeStatusText = `✅ WIN +$${delta.toFixed(2)} Mão Fixa!`;
+      }
+    } else if (status === 'EMPATE') {
+      State.empates++;
+      State.tradeStatusText = '⚪ EMPATE! Mantendo stake.';
+    } else {
+      State.losses++;
+      State.consecutiveLosses++;
+      State.currentProfit = Number((State.currentProfit + delta).toFixed(2));
+      State.currentSorosLevel = 1;
+      State.condicionalWinsCount = 0;
+      State.currentStake = State.entryAmount;
+      State.tradeStatusText = `❌ LOSS -$${Math.abs(delta).toFixed(2)}! Resetando p/ $${State.entryAmount.toFixed(2)}`;
+    }
+
+    if (State.stopLossLimit > 0 && State.consecutiveLosses >= State.stopLossLimit) {
+      State.isRunning = false;
+      State.tradeStatusText = `🛑 STOP LOSS ATINGIDO (${State.consecutiveLosses} derrotas)!`;
+      updatePowerButtonUI();
+      State.tradeInProgress = false;
+      State.orderLock = false;
+      renderHud();
+      return;
+    }
+
+    if (State.currentProfit >= State.targetMeta) {
+      State.isRunning = false;
+      State.tradeStatusText = `🏆 META BATIDA (+$${State.currentProfit.toFixed(2)})!`;
+      updatePowerButtonUI();
+      State.tradeInProgress = false;
+      State.orderLock = false;
+      renderHud();
+      return;
+    }
+
+    renderHud();
+    State.lastTradedAssetName = activePair;
+    pushRecent(normKey(activePair));
+
+    setTimeout(() => {
+      State.tradeStatusText = 'Trocando de ativo para diversificar...';
+      renderHud();
+      const nextVIP = BrokerDOM.pickNextVIPAsset();
+      BrokerDOM.typeAndSwitchAsset(nextVIP, () => {
+        State.tradeInProgress = false;
+        State.orderLock = false;
+        renderHud();
+      });
+    }, 450);
+  }
+
+  function executeEntryNow(decision, activePair, balanceBefore) {
+    const stake = State.currentStake;
+    const payout = State.currentChartPayout || 92;
+    State.lastEntryStake = stake;
+
+    if (!BrokerDOM.setStake(stake)) {
+      State.tradeStatusText = 'Campo de stake não localizado!';
+      State.tradeInProgress = false;
+      State.waitingForZeroSeconds = false;
+      State.orderLock = false;
+      renderHud();
+      return;
+    }
+
+    State.tradeStatusText = `🎯 DISPARO (${State.expirationSeconds}s): [${decision.direction}] $${stake.toFixed(2)}`;
+    renderHud();
+
+    const clickSuccess = BrokerDOM.clickTrade(decision.direction);
+
+    if (!clickSuccess) {
+      State.tradeStatusText = 'Falha ao acionar botão!';
+      State.tradeInProgress = false;
+      State.waitingForZeroSeconds = false;
+      State.orderLock = false;
+      renderHud();
+      return;
+    }
+
+    State.waitingForZeroSeconds = false;
+    const waitMs = Math.max(1000, (State.expirationSeconds * 1000) + 400);
+
+    setTimeout(() => {
+      State.tradeStatusText = 'Auditando resultado real...';
+      renderHud();
+
+      auditTradeResultAccurate(balanceBefore, stake, payout, (status, delta) => {
+        handleTradeResult(status, delta, activePair);
+      });
+    }, waitMs);
+  }
+
+  function scheduleEngineCycle() {
+    if (!State.isRunning || State.tradeInProgress || State.isTypingAsset || State.orderLock) return;
+
+    const now = Date.now();
+    const sync = getCandleSync(State.expirationSeconds);
+    const activePair = State.currentChartAsset;
+    const activeKey = normKey(activePair);
+    const cooldownOk = now - State.lastSwitchTimestamp > SWITCH_COOLDOWN_MS;
+
+    if (activeKey === normKey(State.lastTradedAssetName) || State.recentTradedQueue.includes(activeKey)) {
+      if (cooldownOk) BrokerDOM.typeAndSwitchAsset(BrokerDOM.pickNextVIPAsset());
+      return;
+    }
+
+    BrokerDOM.readCurrentPayout();
+    if (State.payoutKnown && State.currentChartPayout < State.minPayoutFilter) {
+      if (cooldownOk) {
+        State.tradeStatusText = `Payout ${State.currentChartPayout}% < ${State.minPayoutFilter}% - Trocando...`;
+        BrokerDOM.typeAndSwitchAsset(BrokerDOM.pickNextVIPAsset());
+      }
+      return;
+    }
+
+    const decision = ConfluenceEngine.analyze();
+
+    if (decision.evacuate) {
+      if (cooldownOk) {
+        State.tradeStatusText = `🛡️ ${decision.reason} -> Trocando par...`;
+        renderHud();
+        BrokerDOM.typeAndSwitchAsset(BrokerDOM.pickNextVIPAsset());
+      }
+      return;
+    }
+
+    if (!decision.canTrade) {
+      const age = now - State.lastSwitchTimestamp;
+      const buf = RealCandleTracker.getBuffer(activePair);
+      if (buf.history.length >= MIN_HISTORY && age > SCAN_TIMEOUT_MS && cooldownOk) {
+        State.tradeStatusText = `Sem sinal em ${activePair}. Trocando...`;
+        BrokerDOM.typeAndSwitchAsset(BrokerDOM.pickNextVIPAsset());
+      }
+      return;
+    }
+
+    if (!State.waitingForZeroSeconds) {
+      const balanceBefore = BrokerDOM.readBalance();
+      if (balanceBefore <= 0 || State.currentStake > balanceBefore) {
+        State.tradeStatusText = 'Saldo insuficiente!';
+        renderHud();
+        return;
+      }
+
+      State.waitingForZeroSeconds = true;
+      State.pendingEntry = { decision, activePair, balanceBefore };
+    }
+
+    if (State.waitingForZeroSeconds && State.pendingEntry) {
+      State.tradeStatusText = `⏳ ARMADO: ${decision.direction} (${decision.reason}) • Virada (${sync.secondsUntilNextCandle}s)`;
+      renderHud();
+
+      if (sync.isAtZeroThreshold && State.lastTradedCandleId !== sync.candleId && !State.orderLock) {
+        State.tradeInProgress = true;
+        State.lastTradedCandleId = sync.candleId;
+        const entry = State.pendingEntry;
+        State.pendingEntry = null;
+        executeEntryNow(entry.decision, entry.activePair, entry.balanceBefore);
+      }
+    }
+  }
+
+  function injectTitaniumPanel() {
+    const old = document.getElementById('orion-titanium-root');
+    if (old) old.remove();
+
+    const root = document.createElement('div');
+    root.id = 'orion-titanium-root';
+    root.style.cssText = 'position:fixed;bottom:25px;left:20px;width:580px;max-width:96vw;z-index:2147483647;font-family:Inter,-apple-system,sans-serif;user-select:none;';
+
+    const lbl = (col) => `display:block;font-size:8.5px;font-weight:800;color:${col};text-transform:uppercase;margin-bottom:2px;`;
+    const inp = (col, bdr) => `width:100%;box-sizing:border-box;background:#06040f;border:1px solid ${bdr};border-radius:7px;padding:4px 6px;color:${col};font-family:monospace;font-size:11px;font-weight:800;outline:none;`;
+
+    root.innerHTML = `
+      <div style="position:relative;width:100%;border-radius:24px;background:#080512;border:1.5px solid #10b981;box-shadow:0 24px 65px rgba(0,0,0,0.96),0 0 32px rgba(16,185,129,0.35);overflow:hidden;color:#fff;">
+        <video autoplay loop muted playsinline src="${DESKTOP_VIDEO}" style="position:absolute;inset:0;width:100%;height:100%;object-fit:cover;opacity:0.3;filter:hue-rotate(115deg) saturate(2.4);pointer-events:none;z-index:0;"></video>
+        <div style="position:absolute;inset:0;background:radial-gradient(circle at 50% 25%, rgba(16,185,129,0.22), rgba(6,4,15,0.94));pointer-events:none;z-index:0;"></div>
+
+        <div id="orion-drag-header" style="position:relative;z-index:2;padding:9px 14px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid rgba(16,185,129,0.25);background:rgba(9,6,20,0.88);cursor:move;">
+          <div style="display:flex;align-items:center;gap:8px;">
+            <span style="font-size:15px;font-weight:900;letter-spacing:0.08em;color:#fff;text-shadow:0 0 12px rgba(16,185,129,0.85);">ORION TITANIUM v39.0 (ANTI-EXAUSTÃO)</span>
+            <span id="orion-brazil-clock" style="font-family:monospace;font-size:11px;font-weight:800;color:#34d399;background:rgba(16,185,129,0.18);border:1px solid rgba(16,185,129,0.4);border-radius:6px;padding:2px 7px;">--:--:--</span>
+          </div>
+          <div style="display:flex;align-items:center;gap:6px;">
+            <button id="orion-btn-power" style="padding:6px 14px;border-radius:9px;font-size:11px;font-weight:900;border:none;cursor:pointer;color:#fff;background:linear-gradient(90deg,#059669,#10b981);box-shadow:0 4px 14px rgba(16,185,129,0.4);">Ligar Robô</button>
+            <button id="orion-btn-reset" title="Zerar Placar" style="width:28px;height:28px;border-radius:50%;background:rgba(16,185,129,0.15);border:1px solid rgba(16,185,129,0.4);color:#6ee7b7;cursor:pointer;font-size:12px;">↺</button>
+          </div>
+        </div>
+
+        <div style="position:relative;z-index:2;padding:6px 12px;background:rgba(8,5,18,0.85);border-bottom:1px solid rgba(16,185,129,0.18);">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;">
+            <span style="font-size:8.5px;font-weight:900;color:#6ee7b7;letter-spacing:0.08em;">📡 RADAR 4 PARES OTC COM FILTROS ATIVOS</span>
+            <span id="orion-ws-stat" style="font-family:monospace;font-size:9px;color:#a7f3d0;">WS CONECTADO</span>
+          </div>
+          <div id="orion-radar-container" style="display:grid;grid-template-columns:repeat(4,1fr);gap:5px;"></div>
+        </div>
+
+        <div style="position:relative;z-index:2;padding:6px 14px;background:rgba(6,4,15,0.88);border-bottom:1px solid rgba(16,185,129,0.18);">
+          <div style="display:flex;justify-content:space-between;font-size:9.5px;font-family:monospace;margin-bottom:3px;">
+            <span style="color:#34d399;font-weight:800;display:inline-flex;align-items:center;gap:4px;"><img src="${BULL_ICON}" style="width:13px;height:13px;" /> <strong id="orion-bull-pct">50%</strong></span>
+            <span style="color:#f43f5e;font-weight:800;display:inline-flex;align-items:center;gap:4px;"><img src="${BEAR_ICON}" style="width:13px;height:13px;" /> <strong id="orion-bear-pct">50%</strong></span>
+          </div>
+          <div style="display:flex;width:100%;height:6px;border-radius:999px;overflow:hidden;background:#1e1b2e;">
+            <div id="orion-bull-bar" style="width:50%;background:linear-gradient(90deg,#059669,#10b981);transition:width 0.3s ease;"></div>
+            <div id="orion-bear-bar" style="width:50%;background:linear-gradient(90deg,#e11d48,#ef4444);transition:width 0.3s ease;"></div>
+          </div>
+          <div id="orion-sr-zone-text" style="text-align:center;font-size:10px;font-weight:800;color:#34d399;margin-top:4px;font-family:monospace;">MONITORANDO VELAS E CONTEXTO...</div>
+        </div>
+
+        <div style="position:relative;z-index:2;padding:7px 14px;background:rgba(9,6,20,0.92);border-bottom:1px solid rgba(16,185,129,0.18);display:flex;justify-content:space-between;align-items:center;">
+          <div style="display:flex;align-items:center;gap:6px;font-size:11px;">
+            <span style="color:#a7f3d0;font-weight:800;">ATIVO ATUAL:</span>
+            <span id="orion-typed-box" style="font-family:monospace;font-weight:800;color:#34d399;background:rgba(16,185,129,0.18);padding:2px 8px;border-radius:5px;border:1px solid rgba(16,185,129,0.5);">NZD/USD (OTC)</span>
+          </div>
+          <span style="font-size:9px;color:#34d399;font-weight:800;background:rgba(16,185,129,0.15);padding:3px 7px;border-radius:5px;border:1px solid rgba(16,185,129,0.3);">OPERAÇÃO EM 10s / 15s</span>
+        </div>
+
+        <div style="position:relative;z-index:2;padding:9px 14px;background:rgba(9,6,20,0.9);border-bottom:1px solid rgba(16,185,129,0.18);display:grid;grid-template-columns:repeat(5,1fr);gap:7px;align-items:center;">
+          <div>
+            <label style="${lbl('#a7f3d0')}">1ª Entrada ($)</label>
+            <input id="orion-input-stake" type="number" min="1" step="1" value="${State.entryAmount}" style="${inp('#34d399', 'rgba(16,185,129,0.5)')}" />
+          </div>
+          <div>
+            <label style="${lbl('#a7f3d0')}">Gestão</label>
+            <select id="orion-select-mode" style="width:100%;box-sizing:border-box;background:#06040f;border:1px solid rgba(16,185,129,0.5);border-radius:7px;padding:4px 3px;color:#6ee7b7;font-family:monospace;font-size:9.5px;font-weight:800;outline:none;">
+              <option value="SOROS" ${State.managementMode === 'SOROS' ? 'selected' : ''}>SOROS DIRETO</option>
+              <option value="SOROS_CONDICIONAL" ${State.managementMode === 'SOROS_CONDICIONAL' ? 'selected' : ''}>CONDICIONAL (2 WINS)</option>
+              <option value="MAO_FIXA" ${State.managementMode === 'MAO_FIXA' ? 'selected' : ''}>MÃO FIXA</option>
+            </select>
+          </div>
+          <div>
+            <label style="${lbl('#fbbf24')}">Min Pay (%)</label>
+            <input id="orion-input-minpayout" type="number" min="50" max="99" value="${State.minPayoutFilter}" style="${inp('#fbbf24', 'rgba(251,191,36,0.5)')}" />
+          </div>
+          <div>
+            <label style="${lbl('#f43f5e')}">Stop Seguidas</label>
+            <input id="orion-input-sl" type="number" min="1" max="20" value="${State.stopLossLimit}" style="${inp('#f43f5e', 'rgba(244,63,94,0.5)')}" />
+          </div>
+          <div>
+            <label style="${lbl('#93c5fd')}">Tempo Vela</label>
+            <select id="orion-select-exp" style="width:100%;box-sizing:border-box;background:#06040f;border:1px solid rgba(147,197,253,0.5);border-radius:7px;padding:4px 4px;color:#93c5fd;font-family:monospace;font-size:10px;font-weight:800;outline:none;">
+              <option value="5" ${State.expirationSeconds === 5 ? 'selected' : ''}>5s</option>
+              <option value="10" ${State.expirationSeconds === 10 ? 'selected' : ''}>10s</option>
+              <option value="15" ${State.expirationSeconds === 15 ? 'selected' : ''}>15s</option>
+            </select>
+          </div>
+        </div>
+
+        <div style="position:relative;z-index:2;padding:10px 14px;display:grid;grid-template-columns:1.3fr 1fr;gap:10px;align-items:center;">
+          <div>
+            <div style="display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid rgba(16,185,129,0.15);">
+              <span style="font-size:9.5px;font-weight:800;color:#a7f3d0;">PLACAR</span>
+              <div style="font-family:monospace;font-size:17px;font-weight:900;">
+                <span id="orion-val-wins" style="color:#34d399;">0</span>
+                <span style="color:#64748b;font-size:12px;"> ✕ </span>
+                <span id="orion-val-losses" style="color:#f43f5e;">0</span>
+                <span id="orion-val-acc" style="font-size:9.5px;color:#94a3b8;margin-left:6px;">0% · E0</span>
+              </div>
+            </div>
+            <div style="display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid rgba(16,185,129,0.15);">
+              <span style="font-size:9.5px;font-weight:800;color:#a7f3d0;">LUCRO</span>
+              <span id="orion-val-profit" style="font-family:monospace;font-size:13px;font-weight:900;color:#34d399;">+$ 0.00</span>
+            </div>
+            <div style="display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid rgba(16,185,129,0.15);">
+              <span style="font-size:9.5px;font-weight:800;color:#fbbf24;">ESTADO</span>
+              <span id="orion-val-state" style="font-family:monospace;font-size:10.5px;font-weight:900;color:#fbbf24;">SOROS NÍVEL 1</span>
+            </div>
+            <div style="display:flex;justify-content:space-between;padding:4px 0;">
+              <span style="font-size:9.5px;font-weight:800;color:#a7f3d0;">STATUS</span>
+              <span id="orion-val-status" style="font-family:monospace;font-size:9.5px;color:#e9d5ff;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">Robô pronto</span>
+            </div>
+          </div>
+
+          <div style="display:flex;justify-content:center;">
+            <div style="position:relative;width:115px;height:115px;display:flex;align-items:center;justify-content:center;">
+              <svg style="width:100%;height:100%;transform:rotate(-210deg);" viewBox="0 0 160 160">
+                <circle cx="80" cy="80" r="60" fill="none" stroke="rgba(16,185,129,0.18)" stroke-width="10" stroke-dasharray="251.3 377" stroke-linecap="round"></circle>
+                <circle id="orion-gauge-arc" cx="80" cy="80" r="60" fill="none" stroke="#10b981" stroke-width="10" stroke-dasharray="251.3 377" stroke-dashoffset="15" stroke-linecap="round" style="filter:drop-shadow(0 0 8px #10b981);transition:all 0.35s ease;"></circle>
+              </svg>
+              <div style="position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;">
+                <img id="orion-bull-bear-img" src="${BULL_ICON}" style="width:32px;height:32px;object-fit:contain;" />
+                <div id="orion-gauge-pct" style="font-family:monospace;font-size:15px;font-weight:900;color:#34d399;">0%</div>
+                <span id="orion-gauge-dir" style="font-size:8.5px;font-weight:900;letter-spacing:0.12em;color:#34d399;">AGUARDANDO</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    `;
+
+    document.body.appendChild(root);
+
+    document.getElementById('orion-btn-power').onclick = () => {
+      if (!State.isRunning) {
+        const acc = BrokerDOM.readAccountType();
+        if (acc === 'REAL') {
+          State.tradeStatusText = 'BLOQUEADO: Use conta DEMO para testes!';
+          renderHud();
+          return;
+        }
+
+        State.isRunning = true;
+        State.orderLock = false;
+        State.consecutiveLosses = 0;
+        State.lastSwitchTimestamp = Date.now();
+        State.tradeStatusText = `⚡ Robô Ligado! Analisando Contexto em ${State.expirationSeconds}s...`;
+        updatePowerButtonUI();
+        renderHud();
+
+        const nextAsset = BrokerDOM.pickNextVIPAsset();
+        BrokerDOM.typeAndSwitchAsset(nextAsset, () => {
+          State.tradeStatusText = `Conectado em ${nextAsset.name} (+${nextAsset.defaultPay}%)! Calibrando velas...`;
+          renderHud();
+        });
+      } else {
+        State.isRunning = false;
+        State.orderLock = false;
+        State.tradeInProgress = false;
+        State.waitingForZeroSeconds = false;
+        State.tradeStatusText = 'Robô Desligado';
+        updatePowerButtonUI();
+        renderHud();
+      }
+    };
+
+    document.getElementById('orion-btn-reset').onclick = () => {
+      State.wins = 0; State.losses = 0; State.empates = 0; State.currentProfit = 0;
+      State.consecutiveLosses = 0; State.currentSorosLevel = 1; State.condicionalWinsCount = 0;
+      State.currentStake = State.entryAmount;
+      State.orderLock = false;
+      State.recentTradedQueue = [];
+      State.tradeStatusText = 'Placar zerado com sucesso!';
+      renderHud();
+    };
+
+    document.getElementById('orion-input-stake').oninput = (e) => {
+      const v = parseFloat(e.target.value);
+      if (v > 0) {
+        State.entryAmount = v;
+        if (State.currentSorosLevel === 1 || State.managementMode === 'MAO_FIXA') {
+          State.currentStake = v;
+        }
+      }
+    };
+
+    document.getElementById('orion-select-mode').onchange = (e) => {
+      State.managementMode = e.target.value;
+      State.currentSorosLevel = 1;
+      State.condicionalWinsCount = 0;
+      State.currentStake = State.entryAmount;
+      renderHud();
+    };
+
+    document.getElementById('orion-input-minpayout').oninput = (e) => {
+      const v = parseInt(e.target.value, 10);
+      if (!isNaN(v) && v >= 50 && v <= 99) State.minPayoutFilter = v;
+    };
+
+    document.getElementById('orion-input-sl').oninput = (e) => {
+      const v = parseInt(e.target.value, 10);
+      State.stopLossLimit = isNaN(v) || v < 0 ? 0 : v;
+    };
+
+    document.getElementById('orion-select-exp').onchange = (e) => {
+      State.expirationSeconds = parseInt(e.target.value, 10) || 10;
+      RealCandleTracker.resetHistory();
+      State.tradeStatusText = `Modo alterado para ${State.expirationSeconds}s`;
+      renderHud();
+    };
+
+    const handle = document.getElementById('orion-drag-header');
+    handle.onmousedown = (e) => {
+      if (e.target.tagName === 'BUTTON' || e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT') return;
+      const rect = root.getBoundingClientRect();
+      const sx = e.clientX, sy = e.clientY, ox = rect.left, oy = rect.top;
+      root.style.bottom = 'auto';
+      root.style.left = ox + 'px';
+      root.style.top = oy + 'px';
+
+      function move(ev) {
+        root.style.left = Math.max(0, ox + (ev.clientX - sx)) + 'px';
+        root.style.top = Math.max(0, oy + (ev.clientY - sy)) + 'px';
+      }
+      function up() {
+        window.removeEventListener('mousemove', move);
+        window.removeEventListener('mouseup', up);
+      }
+      window.addEventListener('mousemove', move);
+      window.addEventListener('mouseup', up);
+    };
+  }
+
+  function updatePowerButtonUI() {
+    const pBtn = document.getElementById('orion-btn-power');
+    if (!pBtn) return;
+    pBtn.textContent = State.isRunning ? 'Desligar' : 'Ligar Robô';
+    pBtn.style.background = State.isRunning
+      ? 'linear-gradient(90deg, #dc2626, #e11d48)'
+      : 'linear-gradient(90deg, #059669, #10b981)';
+  }
+
+  function renderHud() {
+    const winsEl = document.getElementById('orion-val-wins');
+    const lossesEl = document.getElementById('orion-val-losses');
+    const profitEl = document.getElementById('orion-val-profit');
+    const statusEl = document.getElementById('orion-val-status');
+    const stateEl = document.getElementById('orion-val-state');
+    const bullPctEl = document.getElementById('orion-bull-pct');
+    const bearPctEl = document.getElementById('orion-bear-pct');
+    const bullBar = document.getElementById('orion-bull-bar');
+    const bearBar = document.getElementById('orion-bear-bar');
+    const zoneText = document.getElementById('orion-sr-zone-text');
+    const typedBox = document.getElementById('orion-typed-box');
+    const gaugeDir = document.getElementById('orion-gauge-dir');
+    const gaugePct = document.getElementById('orion-gauge-pct');
+    const gaugeArc = document.getElementById('orion-gauge-arc');
+    const bullBearImg = document.getElementById('orion-bull-bear-img');
+    const wsStat = document.getElementById('orion-ws-stat');
+
+    if (winsEl) winsEl.textContent = String(State.wins);
+    if (lossesEl) lossesEl.textContent = String(State.losses);
+    const accEl = document.getElementById('orion-val-acc');
+    if (accEl) {
+      const tot = State.wins + State.losses;
+      const pct = tot > 0 ? Math.round((State.wins / tot) * 100) : 0;
+      accEl.textContent = `${pct}% · E${State.empates}`;
+    }
+    if (profitEl) {
+      profitEl.textContent = `${State.currentProfit >= 0 ? '+' : '-'}$ ${Math.abs(State.currentProfit).toFixed(2)}`;
+      profitEl.style.color = State.currentProfit >= 0 ? '#34d399' : '#f43f5e';
+    }
+    if (statusEl) {
+      statusEl.textContent = State.tradeStatusText;
+      statusEl.title = State.tradeStatusText;
+    }
+
+    if (stateEl) {
+      if (State.managementMode === 'SOROS') {
+        stateEl.textContent = `SOROS: NÍVEL ${State.currentSorosLevel}/${State.sorosMaxLevel} ($${State.currentStake.toFixed(2)})`;
+      } else if (State.managementMode === 'SOROS_CONDICIONAL') {
+        stateEl.textContent = `CONDICIONAL: ${State.condicionalWinsCount}/2 WINS ($${State.currentStake.toFixed(2)})`;
+      } else {
+        stateEl.textContent = `MÃO FIXA ($${State.currentStake.toFixed(2)})`;
+      }
+    }
+
+    if (typedBox) {
+      typedBox.textContent = State.isTypingAsset
+        ? State.typedSearchText + '▌'
+        : `${State.currentChartAsset} (+${State.currentChartPayout}%)`;
+    }
+
+    if (wsStat) {
+      wsStat.textContent = WSTap.sockets.size > 0 ? `WS ATIVO (${WSTap.ticks} ticks)` : 'WS PROCURANDO...';
+      wsStat.style.color = WSTap.sockets.size > 0 ? '#34d399' : '#fbbf24';
+    }
+
+    if (bullPctEl) bullPctEl.textContent = `${State.bullForcePct}%`;
+    if (bearPctEl) bearPctEl.textContent = `${State.bearForcePct}%`;
+    if (bullBar) bullBar.style.width = `${State.bullForcePct}%`;
+    if (bearBar) bearBar.style.width = `${State.bearForcePct}%`;
+
+    const isCall = State.signalDirection === 'COMPRA';
+    const isPut = State.signalDirection === 'VENDA';
+
+    if (zoneText) {
+      zoneText.textContent = State.srZoneLabel;
+      zoneText.style.color = State.priceMissing ? '#fbbf24' : (isCall ? '#34d399' : (isPut ? '#f43f5e' : '#a7f3d0'));
+    }
+
+    if (gaugeDir) {
+      gaugeDir.textContent = isCall ? '▲ CALL' : (isPut ? '▼ PUT' : 'AGUARDANDO');
+      gaugeDir.style.color = isCall ? '#34d399' : (isPut ? '#f43f5e' : '#94a3b8');
+    }
+
+    if (gaugePct) {
+      gaugePct.textContent = `${State.confidence}%`;
+      gaugePct.style.color = isCall ? '#34d399' : (isPut ? '#f43f5e' : '#94a3b8');
+    }
+
+    if (gaugeArc) {
+      const color = isCall ? '#10b981' : (isPut ? '#ef4444' : '#64748b');
+      gaugeArc.setAttribute('stroke', color);
+      gaugeArc.style.filter = `drop-shadow(0 0 8px ${color})`;
+    }
+
+    if (bullBearImg) bullBearImg.src = isPut ? BEAR_ICON : BULL_ICON;
+  }
+
+  injectTitaniumPanel();
+  BrokerDOM.readCurrentChartSymbol();
+  BrokerDOM.readCurrentPayout();
+  BrokerDOM.readBalance();
+  RealCandleTracker.resetHistory();
+  renderHud();
+
+  window.__ORION_V38_INTERVALS__.push(setInterval(() => {
+    try {
+      RealCandleTracker.sampleTickDOM();
+      scheduleEngineCycle();
+    } catch (e) {
+      console.error('[ORION TITANIUM] Erro no ciclo:', e);
+    }
+  }, 30));
+
+  window.__ORION_V38_INTERVALS__.push(setInterval(() => {
+    try {
+      updateParallelRadar();
+    } catch (e) {}
+  }, 800));
+
+  window.__ORION_V38_INTERVALS__.push(setInterval(() => {
+    try {
+      const clock = document.getElementById('orion-brazil-clock');
+      if (clock) clock.textContent = getBrazilTime();
+
+      if (!State.isTypingAsset) {
+        BrokerDOM.readCurrentChartSymbol();
+        BrokerDOM.readCurrentPayout();
+      }
+      BrokerDOM.readBalance();
+
+      const brokerExp = BrokerDOM.readBrokerExpiration();
+      if (brokerExp && (brokerExp === 5 || brokerExp === 10 || brokerExp === 15) && brokerExp !== State.expirationSeconds && !State.tradeInProgress) {
+        State.expirationSeconds = brokerExp;
+        RealCandleTracker.resetHistory();
+      }
+
+      const expSel = document.getElementById('orion-select-exp');
+      if (expSel) {
+        expSel.value = String(State.expirationSeconds);
+      }
+
+      if (State.isTypingAsset && Date.now() - State.typingStartedAt > 8000) {
+        State.switchToken++;
+        State.isTypingAsset = false;
+        State.tradeInProgress = false;
+        State.waitingForZeroSeconds = false;
+        State.orderLock = false;
+        State.lastSwitchTimestamp = Date.now();
+        RealCandleTracker.resetHistory();
+        State.tradeStatusText = 'Troca destravada com sucesso.';
+      }
+
+      renderHud();
+    } catch (e) {
+      console.error('[ORION TITANIUM] Erro no loop HUD:', e);
+    }
+  }, 200));
+
+  console.log('%c[ORION TITANIUM v39.0] Pronto para Operar!', 'color: #34d399; font-weight: 900; font-size: 15px;');
+})();

@@ -1,0 +1,62 @@
+@import url("https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600&family=Rajdhani:wght@500;600;700&display=swap");
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Outfit", ui-sans-serif, system-ui, sans-serif;
+  --font-display: "Rajdhani", ui-sans-serif, sans-serif;
+  --color-bg: #07090c;
+  --color-panel: #10141b;
+  --color-panel-2: #171d27;
+  --color-fg: #e8ebef;
+  --color-muted: #8e98a6;
+  --color-faint: #5c6673;
+  --color-line: #2a3340;
+  --color-up: #1fcb6b;
+  --color-up-dim: #123d28;
+  --color-down: #ff2e4c;
+  --color-down-dim: #3d1520;
+  --color-gold: #e9a825;
+  --color-gold-dim: #3a2e10;
+  --color-ink: #04150c;
+}
+
+@layer base {
+  html,
+  body {
+    height: 100%;
+    background: var(--color-bg);
+    color: var(--color-fg);
+  }
+  body {
+    font-family: var(--font-sans);
+    text-rendering: optimizeLegibility;
+  }
+  button:not(:disabled),
+  [role="button"]:not(:disabled) {
+    cursor: pointer;
+  }
+  input[type="number"]::-webkit-outer-spin-button,
+  input[type="number"]::-webkit-inner-spin-button {
+    appearance: none;
+    margin: 0;
+  }
+  input[type="number"] {
+    appearance: textfield;
+  }
+}
+
+.sky {
+  background:
+    radial-gradient(ellipse at 18% -10%, color-mix(in srgb, var(--color-gold) 16%, transparent), transparent 46%),
+    radial-gradient(ellipse at 100% 100%, color-mix(in srgb, var(--color-up) 10%, transparent), transparent 42%),
+    var(--color-bg);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation: none !important;
+    transition: none !important;
+  }
+}
